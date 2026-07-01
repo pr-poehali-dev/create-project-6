@@ -5,20 +5,19 @@ import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Badge } from '@/components/ui/badge';
+import { useToast } from '@/hooks/use-toast';
+import {
+  WEBNOVEL_API,
+  exportBook,
+  type Chapter,
+  type Catalog,
+  type ChapterContent,
+} from '@/lib/bookExport';
 
 const HERO_IMG =
   'https://cdn.poehali.dev/projects/08d64609-ca87-4c30-b7b4-f6613e60a51c/files/ccbbb65c-1c8a-48ba-bc4e-b6c3a262b724.jpg';
 
 type Section = 'home' | 'download' | 'history';
-
-const DEMO_CHAPTERS = [
-  { n: 1, title: "UOS Chapter 001: Konoha's Second Sun", date: '1 месяц назад', free: true },
-  { n: 2, title: 'UOS Chapter 002: Night of the Nine-Tails', date: '1 месяц назад', free: true },
-  { n: 3, title: "UOS Chapter 003: A Mere Tailed Beast Bomb Can't Compare", date: '1 месяц назад', free: true },
-  { n: 4, title: "UOS Chapter 004: Good People Don't Live Long", date: '1 месяц назад', free: true },
-  { n: 5, title: 'UOS Chapter 005: Beating Up Shimura Danzo', date: '1 месяц назад', free: true },
-  { n: 6, title: 'UOS Chapter 006: The Uchiha Legacy', date: '1 месяц назад', free: false },
-];
 
 const FORMATS = [
   { id: 'txt', label: 'TXT', icon: 'FileText', desc: 'Простой текст' },
@@ -42,44 +41,125 @@ const FEATURES = [
 ];
 
 export default function Index() {
+  const { toast } = useToast();
   const [section, setSection] = useState<Section>('home');
   const [url, setUrl] = useState('');
   const [scanning, setScanning] = useState(false);
-  const [chapters, setChapters] = useState<typeof DEMO_CHAPTERS>([]);
-  const [selected, setSelected] = useState<number[]>([]);
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
   const [format, setFormat] = useState('epub');
   const [progress, setProgress] = useState(0);
   const [downloading, setDownloading] = useState(false);
-  const [preview, setPreview] = useState<(typeof DEMO_CHAPTERS)[0] | null>(null);
+  const [doneCount, setDoneCount] = useState(0);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const [preview, setPreview] = useState<Chapter | null>(null);
+  const [previewText, setPreviewText] = useState('');
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const chapters = catalog?.chapters ?? [];
 
   const goDownload = () => setSection('download');
 
-  const scan = () => {
+  const scan = async () => {
+    if (!url.trim()) {
+      toast({ title: 'Вставьте ссылку', description: 'Нужна ссылка на книгу с webnovel.com' });
+      return;
+    }
     setScanning(true);
-    setChapters([]);
-    setTimeout(() => {
-      setChapters(DEMO_CHAPTERS);
-      setSelected(DEMO_CHAPTERS.filter((c) => c.free).map((c) => c.n));
+    setCatalog(null);
+    setSelected([]);
+    try {
+      const res = await fetch(WEBNOVEL_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'catalog', url }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || 'Ошибка сканирования');
+      setCatalog(data);
+      setSelected(data.chapters.filter((c: Chapter) => c.free).map((c: Chapter) => c.id));
+      toast({ title: 'Главы найдены', description: `${data.total} глав в «${data.title}»` });
+    } catch (e) {
+      toast({
+        title: 'Не удалось найти главы',
+        description: e instanceof Error ? e.message : 'Попробуйте другую ссылку',
+        variant: 'destructive',
+      });
+    } finally {
       setScanning(false);
-    }, 1400);
+    }
   };
 
-  const toggle = (n: number) =>
-    setSelected((s) => (s.includes(n) ? s.filter((x) => x !== n) : [...s, n]));
+  const toggle = (id: string) =>
+    setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
 
-  const startDownload = () => {
+  const openPreview = async (c: Chapter) => {
+    setPreview(c);
+    setPreviewText('');
+    setPreviewLoading(true);
+    try {
+      const res = await fetch(WEBNOVEL_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'chapter', bookId: catalog!.bookId, chapterId: c.id }),
+      });
+      const data: ChapterContent = await res.json();
+      setPreviewText(data.content || data.error || 'Содержимое недоступно');
+    } catch {
+      setPreviewText('Не удалось загрузить главу');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const runDownload = async () => {
+    if (!catalog) return;
+    setConfirmOpen(false);
     setDownloading(true);
     setProgress(0);
-    const total = selected.length;
+    setDoneCount(0);
+
+    const ids = selected;
+    const results: ChapterContent[] = [];
+    const BATCH = 10;
     let done = 0;
-    const timer = setInterval(() => {
-      done += 1;
-      setProgress(Math.round((done / total) * 100));
-      if (done >= total) {
-        clearInterval(timer);
-        setTimeout(() => setDownloading(false), 600);
+
+    try {
+      for (let i = 0; i < ids.length; i += BATCH) {
+        const slice = ids.slice(i, i + BATCH);
+        const res = await fetch(WEBNOVEL_API, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'chapters', bookId: catalog.bookId, chapterIds: slice }),
+        });
+        const data = await res.json();
+        (data.chapters || []).forEach((ch: ChapterContent) => results.push(ch));
+        done += slice.length;
+        setDoneCount(done);
+        setProgress(Math.round((done / ids.length) * 100));
       }
-    }, 500);
+
+      const ordered = ids
+        .map((id) => results.find((r) => r.id === id))
+        .filter((r): r is ChapterContent => !!r && !!r.content);
+
+      if (ordered.length === 0) {
+        toast({ title: 'Главы недоступны', description: 'Не удалось получить содержимое', variant: 'destructive' });
+        return;
+      }
+
+      exportBook(format, catalog.title, catalog.author, ordered);
+      toast({ title: 'Готово!', description: `Скачано ${ordered.length} глав в ${format.toUpperCase()}` });
+    } catch (e) {
+      toast({
+        title: 'Ошибка скачивания',
+        description: e instanceof Error ? e.message : 'Попробуйте ещё раз',
+        variant: 'destructive',
+      });
+    } finally {
+      setDownloading(false);
+    }
   };
 
   return (
@@ -168,12 +248,13 @@ export default function Index() {
       {section === 'download' && (
         <main className="container max-w-3xl py-12">
           <h1 className="font-display text-4xl font-bold">Загрузка книги</h1>
-          <p className="mt-2 text-muted-foreground">Вставь ссылку на книгу с m.webnovel.com</p>
+          <p className="mt-2 text-muted-foreground">Вставь ссылку на книгу с webnovel.com</p>
 
           <div className="glass mt-6 flex flex-col gap-3 rounded-2xl p-4 sm:flex-row">
             <Input
               value={url}
               onChange={(e) => setUrl(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && scan()}
               placeholder="https://m.webnovel.com/book/..."
               className="h-12 border-white/10 bg-background/50 text-base"
             />
@@ -186,18 +267,18 @@ export default function Index() {
             </Button>
           </div>
 
-          {chapters.length > 0 && (
+          {catalog && (
             <div className="mt-8 animate-fade-in">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h2 className="font-display text-2xl font-bold">120 глав обновлено</h2>
+                  <h2 className="font-display text-2xl font-bold">{catalog.title}</h2>
                   <p className="text-sm text-muted-foreground">
-                    Выбрано {selected.length} · доступны бесплатные главы
+                    {catalog.total} глав · выбрано {selected.length}
                   </p>
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" className="rounded-full border-white/15"
-                    onClick={() => setSelected(chapters.filter((c) => c.free).map((c) => c.n))}>
+                    onClick={() => setSelected(chapters.filter((c) => c.free).map((c) => c.id))}>
                     Все бесплатные
                   </Button>
                   <Button variant="outline" size="sm" className="rounded-full border-white/15"
@@ -225,18 +306,18 @@ export default function Index() {
               </div>
 
               {/* Chapter list */}
-              <div className="mt-5 space-y-2">
+              <div className="mt-5 max-h-[420px] space-y-2 overflow-auto pr-1">
                 {chapters.map((c) => (
                   <div
-                    key={c.n}
+                    key={c.id}
                     className={`glass flex items-center gap-3 rounded-xl p-3 transition-all ${
-                      !c.free ? 'opacity-50' : selected.includes(c.n) ? 'border-primary/50' : ''
+                      !c.free ? 'opacity-50' : selected.includes(c.id) ? 'border-primary/50' : ''
                     }`}
                   >
                     <Checkbox
-                      checked={selected.includes(c.n)}
+                      checked={selected.includes(c.id)}
                       disabled={!c.free}
-                      onCheckedChange={() => toggle(c.n)}
+                      onCheckedChange={() => toggle(c.id)}
                     />
                     <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-secondary text-xs font-semibold">
                       {c.n}
@@ -249,7 +330,7 @@ export default function Index() {
                         <Icon name="Lock" size={11} className="mr-1" /> платно
                       </Badge>
                     )}
-                    <button onClick={() => setPreview(c)} disabled={!c.free}
+                    <button onClick={() => openPreview(c)} disabled={!c.free}
                       className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-30">
                       <Icon name="Eye" size={16} />
                     </button>
@@ -263,15 +344,13 @@ export default function Index() {
                   <div>
                     <div className="mb-2 flex items-center justify-between text-sm">
                       <span className="font-medium">Скачивание…</span>
-                      <span className="text-muted-foreground">
-                        {Math.round((progress / 100) * selected.length)} / {selected.length} глав
-                      </span>
+                      <span className="text-muted-foreground">{doneCount} / {selected.length} глав</span>
                     </div>
                     <Progress value={progress} className="h-2.5" />
                   </div>
                 ) : (
                   <Button
-                    onClick={startDownload}
+                    onClick={() => setConfirmOpen(true)}
                     disabled={selected.length === 0}
                     size="lg"
                     className="w-full rounded-xl glow-shadow"
@@ -309,23 +388,51 @@ export default function Index() {
       {preview && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm animate-fade-in"
           onClick={() => setPreview(null)}>
-          <div className="glass max-h-[80vh] w-full max-w-lg overflow-auto rounded-2xl p-6" onClick={(e) => e.stopPropagation()}>
+          <div className="glass flex max-h-[80vh] w-full max-w-lg flex-col rounded-2xl p-6" onClick={(e) => e.stopPropagation()}>
             <div className="mb-4 flex items-start justify-between gap-4">
               <h3 className="font-display text-2xl font-bold">{preview.title}</h3>
               <button onClick={() => setPreview(null)} className="rounded-lg p-1 hover:bg-secondary">
                 <Icon name="X" size={20} />
               </button>
             </div>
-            <p className="text-muted-foreground">
-              Здесь отобразится содержимое главы для предпросмотра перед скачиванием — оригинальный текст и, при желании,
-              перевод на русский с индикатором прогресса.
-            </p>
+            <div className="min-h-[120px] flex-1 overflow-auto whitespace-pre-wrap text-sm leading-relaxed text-muted-foreground">
+              {previewLoading ? (
+                <div className="flex items-center gap-2"><Icon name="Loader2" size={16} className="animate-spin" /> Загрузка…</div>
+              ) : (
+                previewText
+              )}
+            </div>
             <div className="mt-5 flex gap-2">
-              <Button variant="outline" className="flex-1 rounded-xl border-white/15">
+              <Button variant="outline" className="flex-1 rounded-xl border-white/15" disabled>
                 <Icon name="Languages" size={16} className="mr-2" /> Перевод RU
               </Button>
               <Button className="flex-1 rounded-xl" onClick={() => setPreview(null)}>
                 <Icon name="Check" size={16} className="mr-2" /> Готово
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirm download modal */}
+      {confirmOpen && catalog && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm animate-fade-in"
+          onClick={() => setConfirmOpen(false)}>
+          <div className="glass w-full max-w-md rounded-2xl p-6 text-center" onClick={(e) => e.stopPropagation()}>
+            <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-primary/15">
+              <Icon name="Download" size={26} className="text-primary" />
+            </div>
+            <h3 className="font-display text-2xl font-bold">Подтвердите скачивание</h3>
+            <p className="mt-2 text-muted-foreground">
+              Скачать <b className="text-foreground">{selected.length}</b> глав книги «{catalog.title}»
+              в формате <b className="text-foreground">{format.toUpperCase()}</b>?
+            </p>
+            <div className="mt-6 flex gap-3">
+              <Button variant="outline" className="flex-1 rounded-xl border-white/15" onClick={() => setConfirmOpen(false)}>
+                Отмена
+              </Button>
+              <Button className="flex-1 rounded-xl glow-shadow" onClick={runDownload}>
+                <Icon name="Check" size={16} className="mr-2" /> Скачать
               </Button>
             </div>
           </div>

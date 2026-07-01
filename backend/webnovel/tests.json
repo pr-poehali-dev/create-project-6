@@ -1,0 +1,34 @@
+{
+  "tests": [
+    {
+      "name": "OPTIONS CORS preflight",
+      "method": "OPTIONS",
+      "path": "/",
+      "expectedStatus": 200
+    },
+    {
+      "name": "Catalog by book url",
+      "method": "POST",
+      "path": "/",
+      "body": {
+        "action": "catalog",
+        "url": "https://m.webnovel.com/book/uchiha-orphan-so-what-if-i'm-ruthless_35939753408038705"
+      },
+      "expectedStatus": 200,
+      "expectedBody": {
+        "bookId": "string"
+      },
+      "bodyMatcher": "partial"
+    },
+    {
+      "name": "Bad url returns 400",
+      "method": "POST",
+      "path": "/",
+      "body": {
+        "action": "catalog",
+        "url": "not-a-link"
+      },
+      "expectedStatus": 400
+    }
+  ]
+}
